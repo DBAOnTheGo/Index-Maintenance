@@ -1,0 +1,223 @@
+/*************************************************************
+Created by Bill Barnes
+Script Date: 06/19/2013 09:24
+for non commercial and testing purposes.
+MaintenanceStatistics was created for SQL Server 2008 SP1 or higher
+This job creates two tables located in master. 
+master.dbo.DBA_UnderUsedIndexes
+master.dbo.DBA_MissingIndexes
+The job created is MaintenaceStatistics.
+This job pulls valuable information into the two above tables.
+
+--Remember to set a schedule for MaintenanceStatistics. It does 
+--not come with one by default.
+--be careful to target the correct category. [Uncategorized (Local)] is common.
+--make this the owner of the job. SA is common. It's best to change this name.
+*************************************************************/
+
+/*************************************************************
+
+--This query will tell you what indexes have shown zero updates over a 370 day window.
+--The purpose is to ensure you're only removing indexes that have never been used.
+
+--Please do not run this in production and make a decision based on a days data.
+--This job is meant to run at all times, once a day, and collect a years data for strong
+--indexing base lines.
+
+select Max(CurrentTime) as CurrentDate, c.LastServicesRestart, b.DataBaseName, b.TableName, b.Indexname  as CurrentDate 
+FROM master.dbo.DBA_UnderUsedIndexes a
+inner join(select LastServicesRestart, DataBaseName, TableName, indexname, sum(reads) as reads 
+FROM master.dbo.DBA_UnderUsedIndexes 
+group by LastServicesRestart, DataBaseName, TableName, indexname HAVING SUM(reads) = 0) b
+on a.indexname = b.IndexName
+inner join (select distinct LastServicesRestart from master.dbo.DBA_UnderUsedIndexes) c
+on c.LastServicesRestart = a.LastServicesRestart
+group by b.DataBaseName, b.TableName, b.Indexname, c.LastServicesRestart
+
+--This query is meant to produce a list of what indexes may need some work. 
+--Never trust exactly what this shows. Always look deeper and use your best judgement.
+
+select Old.CurrentDate, Dist.sqlserver_start_time, statement, 
+Impact, [Average Total Cost],[% Reduction of Cost], 
+[Missed Opportunities], [Equality Columns], [Inequality Columns], 
+[Included Columns] from master.dbo.DBA_MissingIndexes Orig
+inner join (select distinct sqlserver_start_time from master.dbo.DBA_MissingIndexes) Dist
+on Dist.sqlserver_start_time = Orig.sqlserver_start_time
+inner join (select distinct sqlserver_start_time, Max(CurrentTime) as CurrentDate FROM master.dbo.DBA_MissingIndexes
+group by sqlserver_start_time) Old
+on Orig.CurrentTime = Old.CurrentDate
+--where [% Reduction of Cost] > 50
+Order by sqlserver_start_time, Impact desc
+*************************************************************/
+
+
+USE [master]
+GO
+
+/****** Object:  Table [dbo].[DBA_UnderUsedIndexes]******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[DBA_UnderUsedIndexes](
+	[CurrentTime] [datetime] NOT NULL,
+	[LastServicesRestart] [datetime] NOT NULL,
+	[DataBaseName] [nvarchar](128) NULL,
+	[TableName] [sysname] NOT NULL,
+	[IndexName] [sysname] NULL,
+	[reads] [bigint] NULL,
+	[writes] [bigint] NOT NULL,
+	[rows] [bigint] NULL,
+	[reads_per_write] [numeric](38, 17) NULL
+) ON [PRIMARY]
+
+USE [master]
+GO
+
+/****** Object:  Table [dbo].[MissingIndexes]******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[DBA_MissingIndexes](
+	[CurrentTime] [datetime] NOT NULL,
+	[sqlserver_start_time] [datetime] NOT NULL,
+	[statement] nvarchar(200) NULL,
+	[Impact] bigint NULL,
+	[Average Total Cost] numeric(10,2) NULL,
+	[% Reduction of Cost] int NULL,
+	[Missed Opportunities] int NULL,
+	[Equality Columns] nvarchar(2000) NULL,
+	[Inequality Columns] nvarchar(2000) NULL,
+	[Included Columns] nvarchar(2000) NULL
+) ON [PRIMARY]
+
+GO
+
+
+
+USE [msdb]
+GO
+
+/****** Object:  Job [MaintenanceStatistics]******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]]******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+--be careful to target the correct category. [Uncategorized (Local)] is common.
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'MaintenanceStatistics', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+		--make this the owner of the job. SA is common. It's best to change this name.
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Missing Indexes]******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Missing Indexes', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=0, 
+		@on_fail_action=3, 
+		@on_fail_step_id=0, 
+		@retry_attempts=2, 
+		@retry_interval=10, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'delete from master.dbo.DBA_MissingIndexes
+		where CurrentTime < GETDATE()- 370
+		GO
+		INSERT INTO master.dbo.DBA_MissingIndexes
+		SELECT 
+        current_timestamp as CurrentTime,
+        m.sqlserver_start_time,
+        id.statement,
+        cast(gs.avg_total_user_cost * gs.avg_user_impact * ( gs.user_seeks + gs.user_scans )as bigint) AS Impact,
+        cast(gs.avg_total_user_cost as numeric(10,2)) as [Average Total Cost],
+        cast(gs.avg_user_impact as int) as [% Reduction of Cost],
+        gs.user_seeks + gs.user_scans as [Missed Opportunities],
+        id.equality_columns as [Equality Columns],
+        id.inequality_columns as [Inequality Columns],
+        id.included_columns as [Included Columns]
+--into master.dbo.MissingIndexes
+FROM sys.dm_db_missing_index_group_stats AS gs
+JOIN sys.dm_db_missing_index_groups AS ig ON gs.group_handle = ig.index_group_handle
+JOIN sys.dm_db_missing_index_details AS id ON ig.index_handle = id.index_handle
+join sys.dm_os_sys_info m on m.sqlserver_start_time = sqlserver_start_time
+ORDER BY Impact desc', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Underused Indexes]******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Underused Indexes', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=2, 
+		@retry_interval=10, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'delete from master.dbo.DBA_UnderUsedIndexes
+where CurrentTime < GETDATE()- 370
+exec sp_MSforeachdb @command1 = ''
+use [?]
+INSERT INTO master.dbo.DBA_UnderUsedIndexes
+SELECT current_timestamp as CurrentTime,
+m.sqlserver_start_time as LastServicesRestart
+, DB_NAME() AS DataBaseName
+, o.name as TableName
+, i.name as IndexName   
+, reads=user_seeks + user_scans + user_lookups    
+, writes =  user_updates    
+, rows = (SELECT SUM(p.rows) FROM sys.partitions p WHERE p.index_id = s.index_id AND s.object_id = p.object_id)
+, CASE
+WHEN s.user_updates < 1 THEN 100 
+ELSE 1.00 * (s.user_seeks + s.user_scans + s.user_lookups) / s.user_updates 
+END AS reads_per_write 
+--into master.dbo.DBA_UnderUsedIndexes
+FROM sys.dm_db_index_usage_stats s   
+INNER JOIN sys.indexes i ON i.index_id = s.index_id AND s.object_id = i.object_id   
+INNER JOIN sys.objects o on s.object_id = o.object_id
+INNER JOIN sys.schemas c on o.schema_id = c.schema_id 
+inner join sys.dm_os_sys_info m on m.sqlserver_start_time = sqlserver_start_time
+WHERE OBJECTPROPERTY(s.object_id,''''IsUserTable'''') = 1 
+AND s.database_id = DB_ID()   
+AND i.type_desc = ''''nonclustered''''
+AND i.is_primary_key = 0 
+AND i.is_unique_constraint = 0 
+AND (SELECT SUM(p.rows) FROM sys.partitions p WHERE p.index_id = s.index_id AND s.object_id = p.object_id) > 10000 
+ORDER BY reads, writes desc''', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
+
+
