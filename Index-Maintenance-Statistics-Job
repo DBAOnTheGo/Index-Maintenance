@@ -17,7 +17,7 @@ This job pulls valuable information into the two above tables.
 
 /*************************************************************
 
---This query will tell you what indexes have shown zero updates over a 370 day window.
+--This query will tell you what indexes have shown zero reads over a 370 day window.
 --The purpose is to ensure you're only removing indexes that have never been used.
 
 --Please do not run this in production and make a decision based on a days data.
