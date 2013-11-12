@@ -1,0 +1,26 @@
+/*************************************************************
+Created by Bill Barnes
+Script Date: 06/19/2013 09:24
+This scripts sole purpose is to give a point in time reference 
+of how your indexes are doing and a quick script to repair them.
+Utilize this as a base for any other function you'd like to perform.
+*************************************************************/
+SELECT object_Name(i.object_id)
+AS TableName, i.object_id,
+Schema_Name(o.schema_id)
+AS SchemaName, i.name, avg_fragmentation_in_percent, page_count, partition_number, i.index_id, 
+'ALTER INDEX [' + i.name + '] ON [' + Schema_Name(o.schema_id) + '].[' + object_Name(i.object_id) +
+ '] REBUILD WITH (FILLFACTOR = 100, ONLINE = ON)' as Rebuild_Script
+ --You can remove the fillfactor option if you wish to use the setting applied to index.
+ --online operations will only work with enterprise. This does not currently take into account partitions.
+FROM sys.dm_db_index_physical_stats (NULL, NULL, NULL, NULL, NULL) p
+inner join  sys.objects as o on p.object_id = o.object_id
+inner join sys.schemas as s on o.schema_id = s.schema_id
+inner join sys.indexes as i on p.object_id = i.object_id 
+and p.index_id = i.index_id
+where i.index_id > 0 --This is in place to ignore Heap tables.
+and avg_fragmentation_in_percent > 5 --feel free to change this to any other number. This number is low for real world use.
+-- I would suggest a fragmentation of 30% just because this is for point in time use. This is not a replacement for a maintenance job.
+and page_count > 20 --feel free to change this to any other number. This number is low for real world use.
+-- I would suggest a page count of 1000 for small databases, 5000 for large. Adjust to your environment.
+and o.schema_id <> 4
